@@ -1,0 +1,227 @@
+use axum::{
+    extract::{State, Path},
+    http::StatusCode,
+    routing::{get, put},
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
+use sqlx::{FromRow, PgPool, postgres::PgPoolOptions};
+use std::net::SocketAddr;
+use tower_http::cors::CorsLayer;
+use uuid::Uuid;
+
+// ==========================================
+// 1. 数据模型定义
+// ==========================================
+
+#[derive(Serialize, Deserialize, FromRow)]
+pub struct Node {
+    pub id: Uuid,
+    // 暂时用 Option，因为前端刚刚创建的节点可能还没归属路线图
+    pub roadmap_id: Option<Uuid>, 
+    pub title: String,
+    pub status: Option<String>,
+    pub pos_x: f64,
+    pub pos_y: f64,
+}
+
+// 接收前端创建节点的请求体
+#[derive(Deserialize)]
+pub struct CreateNodeReq {
+    pub title: String,
+    pub pos_x: f64,
+    pub pos_y: f64,
+}
+
+// 接收前端更新节点位置的请求体
+#[derive(Deserialize)]
+pub struct UpdateNodePosReq {
+    pub pos_x: f64,
+    pub pos_y: f64,
+}
+
+#[derive(Serialize, Deserialize, FromRow)]
+pub struct Edge {
+    pub id: Uuid,
+    pub roadmap_id: Option<Uuid>,
+    pub source_node_id: Uuid,
+    pub target_node_id: Uuid,
+}
+
+#[derive(Deserialize)]
+pub struct CreateEdgeReq {
+    pub source: Uuid,
+    pub target: Uuid,
+}
+
+#[derive(Serialize, Deserialize, FromRow)]
+pub struct Note {
+    pub node_id: Uuid,
+    pub content: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateNoteReq {
+    pub content: serde_json::Value,
+}
+
+// ==========================================
+// 2. API 处理函数 (Handlers)
+// ==========================================
+
+// 获取所有节点 (暂时不分路线图，获取所有供测试)
+async fn get_all_nodes(State(pool): State<PgPool>) -> Result<Json<Vec<Node>>, (StatusCode, String)> {
+    let query_str = "SELECT id, roadmap_id, title, status, pos_x, pos_y FROM nodes";
+    
+    match sqlx::query_as::<_, Node>(query_str).fetch_all(&pool).await {
+        Ok(nodes) => Ok(Json(nodes)),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+// 创建新节点
+async fn create_node(
+    State(pool): State<PgPool>,
+    Json(payload): Json<CreateNodeReq>,
+) -> Result<(StatusCode, Json<Node>), (StatusCode, String)> {
+    let query_str = "
+        INSERT INTO nodes (title, pos_x, pos_y) 
+        VALUES ($1, $2, $3) 
+        RETURNING id, roadmap_id, title, status, pos_x, pos_y
+    ";
+    
+    match sqlx::query_as::<_, Node>(query_str)
+        .bind(payload.title)
+        .bind(payload.pos_x)
+        .bind(payload.pos_y)
+        .fetch_one(&pool)
+        .await
+    {
+        Ok(node) => Ok((StatusCode::CREATED, Json(node))),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+// 更新节点位置 (拖拽节点时触发)
+async fn update_node_position(
+    Path(id): Path<Uuid>,
+    State(pool): State<PgPool>,
+    Json(payload): Json<UpdateNodePosReq>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let query_str = "UPDATE nodes SET pos_x = $1, pos_y = $2 WHERE id = $3";
+    
+    match sqlx::query(query_str)
+        .bind(payload.pos_x)
+        .bind(payload.pos_y)
+        .bind(id)
+        .execute(&pool)
+        .await
+    {
+        Ok(_) => Ok(StatusCode::OK),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+// 健康检查
+async fn health_check() -> &'static str {
+    "Pathio API is running!"
+}
+
+// 获取所有连线
+async fn get_all_edges(State(pool): State<PgPool>) -> Result<Json<Vec<Edge>>, (StatusCode, String)> {
+    let query = "SELECT id, roadmap_id, source_node_id, target_node_id FROM edges";
+    match sqlx::query_as::<_, Edge>(query).fetch_all(&pool).await {
+        Ok(edges) => Ok(Json(edges)),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+// 保存新连线
+async fn create_edge(
+    State(pool): State<PgPool>,
+    Json(payload): Json<CreateEdgeReq>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let query = "INSERT INTO edges (source_node_id, target_node_id) VALUES ($1, $2) ON CONFLICT DO NOTHING";
+    match sqlx::query(query)
+        .bind(payload.source)
+        .bind(payload.target)
+        .execute(&pool)
+        .await 
+    {
+        Ok(_) => Ok(StatusCode::CREATED),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+// 获取或初始化笔记
+async fn get_node_note(
+    Path(id): Path<Uuid>,
+    State(pool): State<PgPool>,
+) -> Result<Json<Note>, (StatusCode, String)> {
+    // 如果没有笔记，初始化一个空的 JSON 对象 {"text": ""}
+    let default_content = serde_json::json!({"text": ""});
+    
+    let query = "
+        INSERT INTO notes (node_id, content) VALUES ($1, $2)
+        ON CONFLICT (node_id) DO UPDATE SET node_id = EXCLUDED.node_id
+        RETURNING node_id, content
+    ";
+    
+    match sqlx::query_as::<_, Note>(query)
+        .bind(id)
+        .bind(default_content)
+        .fetch_one(&pool)
+        .await 
+    {
+        Ok(note) => Ok(Json(note)),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+// 保存笔记
+async fn update_node_note(
+    Path(id): Path<Uuid>,
+    State(pool): State<PgPool>,
+    Json(payload): Json<UpdateNoteReq>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let query = "UPDATE notes SET content = $1, updated_at = CURRENT_TIMESTAMP WHERE node_id = $2";
+    match sqlx::query(query).bind(payload.content).bind(id).execute(&pool).await {
+        Ok(_) => Ok(StatusCode::OK),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+// ==========================================
+// 3. 主程序入口
+// ==========================================
+
+#[tokio::main]
+async fn main() {
+    dotenvy::dotenv().ok();
+    let db_url = std::env::var("DATABASE_URL").expect("未设置 DATABASE_URL");
+    let port: u16 = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string()).parse().unwrap();
+
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url)
+        .await
+        .expect("无法连接数据库");
+
+    println!("✅ 成功连接到 Pathio 数据库!");
+
+    // 配置路由
+    let app = Router::new()
+        .route("/api/health", get(health_check))
+        .route("/api/nodes", get(get_all_nodes).post(create_node))
+        .route("/api/nodes/:id/position", put(update_node_position))
+        .route("/api/edges", get(get_all_edges).post(create_edge)) 
+        .route("/api/nodes/:id/note", get(get_node_note).put(update_node_note))
+        .layer(CorsLayer::permissive())
+        .with_state(pool);
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    println!("🚀 后端服务启动于: http://{}", addr);
+    
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+}
