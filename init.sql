@@ -64,3 +64,13 @@ CREATE TABLE notes (
 
 ALTER TABLE nodes ALTER COLUMN roadmap_id DROP NOT NULL;
 
+
+-- 1. 创建一个名为“我的深度研究路径”的路线图，并设置分享 token
+INSERT INTO roadmaps (id, title, share_token) 
+VALUES (gen_random_uuid(), '我的第一个研究路径', 'path123');
+
+-- 2. 将你目前所有的节点都归属到这个路线图下
+UPDATE nodes SET roadmap_id = (SELECT id FROM roadmaps WHERE share_token = 'path123');
+
+-- 3. 将你目前所有的连线也归属过去
+UPDATE edges SET roadmap_id = (SELECT id FROM roadmaps WHERE share_token = 'path123');

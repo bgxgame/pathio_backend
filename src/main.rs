@@ -65,9 +65,57 @@ pub struct UpdateNoteReq {
     pub content: serde_json::Value,
 }
 
+// 增加分享相关的模型
+#[derive(Serialize, Deserialize, FromRow)]
+pub struct Roadmap {
+    pub id: Uuid,
+    pub title: String,
+    pub share_token: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ShareData {
+    pub roadmap_title: String,
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
+}
+
 // ==========================================
 // 2. API 处理函数 (Handlers)
 // ==========================================
+
+// 根据 share_token 获取整个路线图的数据 (只读)
+async fn get_shared_roadmap(
+    Path(token): Path<String>,
+    State(pool): State<PgPool>,
+) -> Result<Json<ShareData>, (StatusCode, String)> {
+    // 1. 先查 roadmap
+    let roadmap = sqlx::query_as::<_, Roadmap>("SELECT id, title, share_token FROM roadmaps WHERE share_token = $1")
+        .bind(&token)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "分享链接已失效".to_string()))?;
+
+    // 2. 查该 roadmap 下的所有节点和连线
+    let nodes = sqlx::query_as::<_, Node>("SELECT id, roadmap_id, title, status, pos_x, pos_y FROM nodes WHERE roadmap_id = $1")
+        .bind(roadmap.id)
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let edges = sqlx::query_as::<_, Edge>("SELECT id, roadmap_id, source_node_id, target_node_id FROM edges WHERE roadmap_id = $1")
+        .bind(roadmap.id)
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(ShareData {
+        roadmap_title: roadmap.title,
+        nodes,
+        edges,
+    }))
+}
 
 // 获取所有节点 (暂时不分路线图，获取所有供测试)
 async fn get_all_nodes(State(pool): State<PgPool>) -> Result<Json<Vec<Node>>, (StatusCode, String)> {
@@ -216,6 +264,7 @@ async fn main() {
         .route("/api/nodes/:id/position", put(update_node_position))
         .route("/api/edges", get(get_all_edges).post(create_edge)) 
         .route("/api/nodes/:id/note", get(get_node_note).put(update_node_note))
+        .route("/api/share/:token", get(get_shared_roadmap))
         .layer(CorsLayer::permissive())
         .with_state(pool);
 
