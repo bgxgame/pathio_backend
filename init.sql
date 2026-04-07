@@ -80,3 +80,16 @@ ALTER TABLE users ALTER COLUMN nickname SET NOT NULL;
 
 -- 2. 确保 nickname 全局唯一（因为要用来登录）
 ALTER TABLE users ADD CONSTRAINT users_nickname_unique UNIQUE (nickname);
+
+-- 修改组织表，增加版本标记
+ALTER TABLE organizations ADD COLUMN plan_type VARCHAR(20) DEFAULT 'free'; -- 'free', 'team'
+
+-- 邀请链接表
+CREATE TABLE invitations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    inviter_id UUID NOT NULL REFERENCES users(id),
+    code VARCHAR(20) UNIQUE NOT NULL,
+    is_used BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
