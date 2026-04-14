@@ -93,3 +93,82 @@ CREATE TABLE node_references (
     url TEXT NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Commercialization loop: billing + entitlement + analytics
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS billing_status VARCHAR(20) DEFAULT 'inactive';
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS current_period_end TIMESTAMP WITH TIME ZONE;
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS billing_market VARCHAR(20) DEFAULT 'cn';
+
+CREATE TABLE IF NOT EXISTS plan_entitlements (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    plan_type VARCHAR(20) NOT NULL,
+    market VARCHAR(20) NOT NULL,
+    currency VARCHAR(10) NOT NULL,
+    price_cents INTEGER NOT NULL DEFAULT 0,
+    billing_interval VARCHAR(20) NOT NULL DEFAULT 'month',
+    max_roadmaps BIGINT,
+    max_nodes_per_org BIGINT,
+    max_members_per_org BIGINT,
+    can_public_share BOOLEAN NOT NULL DEFAULT TRUE,
+    priority_support BOOLEAN NOT NULL DEFAULT FALSE,
+    sso_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    audit_log_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    private_deployment BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(plan_type, market)
+);
+
+INSERT INTO plan_entitlements (
+    plan_type, market, currency, price_cents, billing_interval,
+    max_roadmaps, max_nodes_per_org, max_members_per_org,
+    can_public_share, priority_support, sso_enabled, audit_log_enabled, private_deployment
+) VALUES
+    ('free', 'cn', 'CNY', 0, 'month', 3, 50, 2, TRUE, FALSE, FALSE, FALSE, FALSE),
+    ('team', 'cn', 'CNY', 3000, 'month', NULL, NULL, NULL, TRUE, TRUE, FALSE, FALSE, FALSE),
+    ('enterprise', 'cn', 'CNY', 0, 'month', NULL, NULL, NULL, TRUE, TRUE, TRUE, TRUE, TRUE),
+    ('free', 'global', 'USD', 0, 'month', 3, 50, 2, TRUE, FALSE, FALSE, FALSE, FALSE),
+    ('team', 'global', 'USD', 900, 'month', NULL, NULL, NULL, TRUE, TRUE, FALSE, FALSE, FALSE),
+    ('enterprise', 'global', 'USD', 0, 'month', NULL, NULL, NULL, TRUE, TRUE, TRUE, TRUE, TRUE)
+ON CONFLICT (plan_type, market) DO UPDATE
+SET currency = EXCLUDED.currency,
+    price_cents = EXCLUDED.price_cents,
+    billing_interval = EXCLUDED.billing_interval,
+    max_roadmaps = EXCLUDED.max_roadmaps,
+    max_nodes_per_org = EXCLUDED.max_nodes_per_org,
+    max_members_per_org = EXCLUDED.max_members_per_org,
+    can_public_share = EXCLUDED.can_public_share,
+    priority_support = EXCLUDED.priority_support,
+    sso_enabled = EXCLUDED.sso_enabled,
+    audit_log_enabled = EXCLUDED.audit_log_enabled,
+    private_deployment = EXCLUDED.private_deployment;
+
+CREATE TABLE IF NOT EXISTS billing_checkout_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    plan_type VARCHAR(20) NOT NULL,
+    market VARCHAR(20) NOT NULL,
+    currency VARCHAR(10) NOT NULL,
+    seats INTEGER NOT NULL DEFAULT 1,
+    amount_cents INTEGER NOT NULL DEFAULT 0,
+    provider VARCHAR(40) NOT NULL DEFAULT 'mock_gateway',
+    external_session_id VARCHAR(64) NOT NULL UNIQUE,
+    checkout_url TEXT NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    provider_event_id VARCHAR(128),
+    raw_payload JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS product_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(64) NOT NULL,
+    org_id UUID REFERENCES organizations(id) ON DELETE SET NULL,
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    properties JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_product_events_name_time ON product_events(name, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_product_events_org_time ON product_events(org_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_checkout_sessions_org_time ON billing_checkout_sessions(org_id, created_at DESC);
